@@ -1,0 +1,66 @@
+# Installed into purebateman/RushDI2-Builds as .github/workflows/ios.yml by `publish.bat --ios <zip>`
+# (edit it here, the publisher re-uploads it when it changes).
+# Turns the Xcode project Unity made on Windows (release "ios", RushDI2-iOS-Xcode.zip) into an UNSIGNED
+# RushDI2.ipa on GitHub's free macOS machine, and puts it on the same release. Install it with Sideloadly
+# (it signs the app with your own free Apple ID).
+name: iOS build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  ipa:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - name: Download the Xcode project
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download ios --repo "$GITHUB_REPOSITORY" --pattern RushDI2-iOS-Xcode.zip
+          unzip -q RushDI2-iOS-Xcode.zip -d xc
+          rm RushDI2-iOS-Xcode.zip
+          df -h .
+
+      - name: Fix permissions lost on Windows
+        run: |
+          PROJ=$(find xc -maxdepth 3 -name Unity-iPhone.xcodeproj -print -quit)
+          [ -n "$PROJ" ] || { echo "Unity-iPhone.xcodeproj not found in the zip"; exit 1; }
+          DIR=$(dirname "$PROJ")
+          echo "XC_DIR=$DIR" >> "$GITHUB_ENV"
+          find "$DIR" -name "*.sh" -exec chmod +x {} +
+          [ -d "$DIR/Il2CppOutputProject/IL2CPP" ] && chmod -R +x "$DIR/Il2CppOutputProject/IL2CPP" || true
+          xcodebuild -version
+
+      - name: Build (unsigned)
+        run: |
+          set -o pipefail
+          cd "$XC_DIR"
+          xcodebuild -project Unity-iPhone.xcodeproj -scheme Unity-iPhone -configuration Release \
+            -destination 'generic/platform=iOS' -archivePath "$RUNNER_TEMP/RushDI2.xcarchive" archive \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" \
+            2>&1 | tee "$RUNNER_TEMP/xcodebuild.log" | grep -E "error:|warning: unable|\*\* (ARCHIVE|BUILD)" || true
+          grep -q "ARCHIVE SUCCEEDED" "$RUNNER_TEMP/xcodebuild.log" || { tail -n 150 "$RUNNER_TEMP/xcodebuild.log"; exit 1; }
+
+      - name: Package .ipa
+        run: |
+          mkdir -p Payload
+          cp -R "$RUNNER_TEMP/RushDI2.xcarchive/Products/Applications/"*.app Payload/
+          zip -qry RushDI2.ipa Payload
+          ls -lh RushDI2.ipa
+
+      - name: Put it on the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload ios RushDI2.ipa --clobber --repo "$GITHUB_REPOSITORY"
+
+      - name: Keep the build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: ${{ runner.temp }}/xcodebuild.log
+          if-no-files-found: ignore
